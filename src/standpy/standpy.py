@@ -1,55 +1,62 @@
+## Standard Library
+import abc
+import subprocess
 from functools import wraps
-import platform
+from multiprocessing import Lock
 
-class MetaStandbyLock(type):
+## Third-party
+from oswhich import linux, windows, macosx
+
+#pylint: disable=function-redefined
+class _StandbyLock(metaclass=abc.ABCMeta):
     """
     """
 
-    SYSTEM = platform.system()
+    __wait = 0
+    __lock = Lock()
 
-    def __new__(cls, name: str, bases: tuple, attrs: dict) -> type:
-        if not ('inhibit' in attrs and 'release' in attrs):
-            raise TypeError("Missing implementations for classmethods 'inhibit(cls)' and 'release(cls)'.")
-        else:
-            if name == 'StandbyLock':
-                cls._superclass = super().__new__(cls, name, bases, attrs)
-                return cls._superclass
-            if cls.SYSTEM.upper() in name.upper():
-                if not hasattr(cls, '_superclass'):
-                    raise ValueError("Class 'StandbyLock' must be implemented.")
-                cls._superclass._subclass = super().__new__(cls, name, bases, attrs)
-                return cls._superclass._subclass
+    @classmethod
+    def wait_acquire(cls) -> bool:
+        with cls.__lock:
+            cls.__wait += 1
+            if cls.__wait == 1:
+                return True
+            elif cls.__wait > 1:
+                return False
             else:
-                return super().__new__(cls, name, bases, attrs)
-
-class StandbyLock(metaclass=MetaStandbyLock):
-    """
-    """
-
-    _subclass = None
+                raise RuntimeError("Inconsistent wait count.")
 
     @classmethod
+    def wait_release(cls) -> bool:
+        with cls.__lock:
+            cls.__wait -= 1
+            if cls.__wait == 0:
+                return True
+            elif cls.__wait > 0:
+                return False
+            else:
+                cls.__wait = 0
+                return False
+
+    @abc.abstractclassmethod
     def inhibit(cls):
-        if cls._subclass is None:
-            raise OSError(f"There is no 'StandbyLock' implementation for OS '{platform.system()}'.")
-        else:
-            return cls._subclass.inhibit()
+        ...
 
-    @classmethod
+    @abc.abstractclassmethod
     def release(cls):
-        if cls._subclass is None:
-            raise OSError(f"There is no 'StandbyLock' implementation for OS '{platform.system()}'.")
-        else:
-            return cls._subclass.release()
+        ...
 
-    def __enter__(self, *args, **kwargs):
-        self.inhibit()
+    def __enter__(self):
+        if self.wait_acquire():
+            self.inhibit()
         return self
 
     def __exit__(self, *args, **kwargs):
-        self.release()
+        if self.wait_release():
+            self.release()
 
-class WindowsStandbyLock(StandbyLock):
+@windows
+class StandbyLock(_StandbyLock):
     """
     """
 
@@ -69,7 +76,8 @@ class WindowsStandbyLock(StandbyLock):
         import ctypes
         ctypes.windll.kernel32.SetThreadExecutionState(cls.RELEASE)
 
-class LinuxStandbyLock(metaclass=MetaStandbyLock):
+@linux
+class StandbyLock(_StandbyLock):
     """
     """
 
@@ -78,15 +86,14 @@ class LinuxStandbyLock(metaclass=MetaStandbyLock):
 
     @classmethod
     def inhibit(cls):
-        import subprocess
         subprocess.run([cls.COMMAND, 'mask', *cls.ARGS])
 
     @classmethod
     def release(cls):
-        import subprocess
         subprocess.run([cls.COMMAND, 'unmask', *cls.ARGS])
 
-class DarwinStandbyLock(metaclass=MetaStandbyLock):
+@macosx
+class StandbyLock(_StandbyLock):
     """
     """
 
@@ -97,19 +104,20 @@ class DarwinStandbyLock(metaclass=MetaStandbyLock):
 
     @classmethod
     def inhibit(cls):
-        from subprocess import Popen, PIPE
-        cls._process = Popen([cls.COMMAND], stdin=PIPE, stdout=PIPE)
+        cls._process = subprocess.Popen([cls.COMMAND], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
     @classmethod
     def release(cls):
-        cls._process.stdin.write(cls.BREAK)
-        cls._process.stdin.flush()
-        cls._process.stdin.close()
-        cls._process.wait()
+        if cls._process is not None:
+            cls._process.stdin.write(cls.BREAK)
+            cls._process.stdin.flush()
+            cls._process.stdin.close()
+            cls._process.wait()
+        else:
+            raise RuntimeError("Fatal: release() called before inhibit().")
 
 def standby_lock(callback):
-    """ standby_lock(callable) -> callable
-        This decorator guarantees that the system will not enter standby mode while 'callable' is running.
+    """ This decorator guarantees that the system will not enter standby mode while 'callable' is running.
     """
     @wraps(callback)
     def new_callback(*args, **kwargs):
