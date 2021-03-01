@@ -8,9 +8,16 @@ from multiprocessing import Lock
 from oswhich import linux, windows, macosx
 
 #pylint: disable=function-redefined
-class _StandbyLock(metaclass=abc.ABCMeta):
+class _StandbyLock(object, metaclass=abc.ABCMeta):
     """
     """
+
+    __ref__ = None
+
+    def __new__(cls):
+        if cls.__ref__ is None:
+            cls.__ref__ = object.__new__(cls)
+        return cls.__ref__
 
     __wait = 0
     __lock = Lock()
